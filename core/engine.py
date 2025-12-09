@@ -15,26 +15,21 @@ class VideoEngine:
         self.stop_event = multiprocessing.Event()
         self.input_shm = None
         self.output_shm = None
-        
-        # Shared Counter for FPS
         self.shared_frame_count = None
         
-        # FPS Calculation State
+        self.is_running = False
+        self.start_time = 0
         self.last_fps_check_time = 0
         self.last_frame_count = 0
         self.current_fps = 0.0
         
-        # Status
-        self.is_running = False
-        self.start_time = 0
-        
     def start(self, video_path, output_path, worker_count, buffer_size, effects):
         self.stop()
         
-        # Init Queues & Counter
+        # 1. SETUP QUEUES
         self.input_queue = multiprocessing.Queue(maxsize=1000)
         self.output_queue = multiprocessing.Queue(maxsize=1000)
-        self.shared_frame_count = multiprocessing.Value('i', 0) # 'i' = signed int
+        self.shared_frame_count = multiprocessing.Value('i', 0)
         self.stop_event.clear()
         
         self.is_running = True
@@ -42,18 +37,22 @@ class VideoEngine:
         self.last_fps_check_time = time.time()
         self.last_frame_count = 0
 
-        # Video Props
+        # 2. "TRUE SHAPE" DETECTION (Fixes Glitches)
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened(): raise Exception("Could not open video file.")
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
         
-        if width == 0 or height == 0: raise Exception("Invalid video dimensions.")
-        shape = (height, width, 3) 
+        # Read the first frame to get ACTUAL dimensions (Trust pixel data, not metadata)
+        ret, first_frame = cap.read()
+        if not ret: raise Exception("Could not read first video frame.")
+        
+        true_height, true_width = first_frame.shape[:2]
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release() # Close it, the producer will re-open it
+        
+        shape = (true_height, true_width, 3) 
 
-        # Allocate Memory
+        # 3. ALLOCATE MEMORY (Exact Fit)
         self.input_shm = SharedMemoryBuffer("shm_in", shape, count=buffer_size)
         if not self.input_shm.allocate(): 
             self.input_shm.close()
@@ -64,7 +63,7 @@ class VideoEngine:
             self.output_shm.close()
             if not self.output_shm.allocate(): raise Exception("Failed to alloc Output SHM")
 
-        # Spawn Processes
+        # 4. SPAWN PROCESSES
         p_prod = multiprocessing.Process(target=producer_task, args=(video_path, "shm_in", shape, buffer_size, self.input_queue, self.stop_event))
         p_prod.start()
         self.procs.append(p_prod)
@@ -95,30 +94,22 @@ class VideoEngine:
         self.is_running = False
 
     def check_health(self):
-        if not self.is_running:
-            return False
+        if not self.is_running: return False
         if self.procs:
             alive_count = sum(1 for p in self.procs if p.is_alive())
-            if alive_count == 0:
-                return False 
+            if alive_count == 0: return False 
             return True
         return False
 
     def get_progress(self):
-        """Returns (elapsed_time, fps, frames_processed)"""
-        if not self.is_running:
-            return 0, 0, 0
-            
+        if not self.is_running: return 0, 0, 0
         elapsed = time.time() - self.start_time
         
-        # Calculate instantaneous FPS
         now = time.time()
         delta_time = now - self.last_fps_check_time
-        
         current_count = self.shared_frame_count.value
         delta_frames = current_count - self.last_frame_count
         
-        # Update FPS every 0.5 seconds to prevent jitter
         if delta_time > 0.5:
             self.current_fps = delta_frames / delta_time
             self.last_fps_check_time = now
