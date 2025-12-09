@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import threading
 import time
 import os
@@ -7,7 +7,8 @@ import psutil
 from ui.styles import *
 from core.engine import VideoEngine
 from ui.components import InfoCard, EffectCard
-from ui.graph import RealTimeGraph # <--- NEW IMPORT
+from ui.graph import RealTimeGraph 
+from utils.logger import log 
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
@@ -16,34 +17,38 @@ class VideoProcessingApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # --- SAFETY ---
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # --- HARDWARE ---
         self.cpu_count = os.cpu_count() or 4
         self.total_ram_gb = round(psutil.virtual_memory().total / (1024**3))
         self.max_workers = max(1, self.cpu_count - 1) 
-        self.max_buffer_slots = int((self.total_ram_gb * 0.25 * 1024) / 6)
-        self.max_buffer_slots = min(self.max_buffer_slots, 300)
+        self.max_buffer_slots = min(int((self.total_ram_gb * 0.25 * 1024) / 6), 300)
 
-        # Window Setup
-        self.title("LuminaFlow Pro | Parallel Video Engine")
-        self.geometry("1200x900") 
+        # Window Setup - COMPACT
+        self.title("LuminaFlow Pro")
+        self.geometry("1100x700") 
+        self.minsize(900, 600)
+        
         self.engine = VideoEngine()
         self.selected_file = ""
         self.active_effects = []
         self.ui_is_processing = False 
+        self.effect_cards = {} 
 
-        # --- ROOT GRID ---
+        # --- GRID ---
         self.grid_columnconfigure(1, weight=1) 
         self.grid_rowconfigure(0, weight=1)    
 
         # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=300, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False) 
 
         # Main Area
         self.main_area = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_area.grid(row=0, column=1, sticky="nsew", padx=30, pady=20)
-        
+        self.main_area.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
         self.main_area.grid_rowconfigure(0, weight=1) 
         self.main_area.grid_columnconfigure(0, weight=1)
 
@@ -51,102 +56,150 @@ class VideoProcessingApp(ctk.CTk):
         self._build_main_area()
         
         self.after(500, self._update_metrics)
+        log.info("UI Initialized (Ultra Compact).")
 
     def _build_sidebar(self):
-        ctk.CTkLabel(self.sidebar, text="LuminaFlow", font=("Roboto", 24, "bold"), text_color=ACCENT).pack(pady=(40, 5))
-        ctk.CTkLabel(self.sidebar, text=f"Detected: {self.cpu_count} Cores / {self.total_ram_gb}GB RAM", 
-                     font=("Roboto", 11), text_color=TEXT_GRAY).pack(pady=(0, 40))
+        # Header
+        ctk.CTkLabel(self.sidebar, text="LuminaFlow", font=("Roboto", 20, "bold"), text_color=ACCENT).pack(pady=(20, 5))
+        ctk.CTkLabel(self.sidebar, text=f"{self.cpu_count} Cores / {self.total_ram_gb}GB RAM", 
+                     font=("Roboto", 10), text_color=TEXT_GRAY).pack(pady=(0, 20))
 
-        self._create_section_label(self.sidebar, "INPUT SOURCE")
-        self.btn_browse = ctk.CTkButton(self.sidebar, text="Import Video File", command=self._select_file, height=45, fg_color="#333333", hover_color="#404040")
-        self.btn_browse.pack(padx=25, pady=10, fill="x")
-        self.lbl_file = ctk.CTkLabel(self.sidebar, text="No file selected", text_color=TEXT_GRAY, font=("Roboto", 11), wraplength=240)
-        self.lbl_file.pack(padx=25, pady=5)
+        # Input
+        self._create_section_label(self.sidebar, "INPUT")
+        self.btn_browse = ctk.CTkButton(self.sidebar, text="Import Video", command=self._select_file, height=32, fg_color="#333333", hover_color="#404040")
+        self.btn_browse.pack(padx=15, pady=5, fill="x")
+        self.lbl_file = ctk.CTkLabel(self.sidebar, text="No file selected", text_color=TEXT_GRAY, font=("Roboto", 10), wraplength=200)
+        self.lbl_file.pack(padx=15, pady=2)
 
-        self._create_section_label(self.sidebar, "SYSTEM TUNING")
-        self.lbl_workers = ctk.CTkLabel(self.sidebar, text=f"Threads: 2", anchor="w", font=("Roboto", 12))
-        self.lbl_workers.pack(padx=25, pady=(10, 0), fill="x")
-        self.slider_workers = ctk.CTkSlider(self.sidebar, from_=1, to=self.max_workers, number_of_steps=self.max_workers-1, command=self._update_worker_label)
+        # Presets
+        self._create_section_label(self.sidebar, "PRESETS")
+        presets = [("🎬 Cinematic", ["HDR", "Vignette"]), ("📜 Vintage", ["Sepia", "Vignette"]), ("🖍️ Sketch", ["Sketch", "Contrast"]), ("🔍 Repair", ["Denoise", "Sharpen"])]
+        for name, filters in presets:
+            btn = ctk.CTkButton(self.sidebar, text=name, command=lambda f=filters: self._apply_preset(f),
+                                fg_color="transparent", border_width=1, border_color="#404040", text_color="#A0A0A0", height=28)
+            btn.pack(padx=15, pady=2, fill="x")
+
+        # Tuning
+        self._create_section_label(self.sidebar, "TUNING")
+        self.lbl_workers = ctk.CTkLabel(self.sidebar, text=f"Threads: 2", anchor="w", font=("Roboto", 10))
+        self.lbl_workers.pack(padx=15, pady=(5, 0), fill="x")
+        self.slider_workers = ctk.CTkSlider(self.sidebar, from_=1, to=self.max_workers, number_of_steps=self.max_workers-1, command=self._update_worker_label, height=14)
         self.slider_workers.set(max(1, self.max_workers // 2))
-        self.slider_workers.pack(padx=25, pady=5, fill="x")
+        self.slider_workers.pack(padx=15, pady=2, fill="x")
         
-        self.lbl_buffer = ctk.CTkLabel(self.sidebar, text=f"Buffer: 30", anchor="w", font=("Roboto", 12))
-        self.lbl_buffer.pack(padx=25, pady=(20, 0), fill="x")
-        self.slider_buffer = ctk.CTkSlider(self.sidebar, from_=10, to=self.max_buffer_slots, number_of_steps=20, command=self._update_buffer_label)
+        self.lbl_buffer = ctk.CTkLabel(self.sidebar, text=f"Buffer: 30", anchor="w", font=("Roboto", 10))
+        self.lbl_buffer.pack(padx=15, pady=(5, 0), fill="x")
+        self.slider_buffer = ctk.CTkSlider(self.sidebar, from_=10, to=self.max_buffer_slots, number_of_steps=20, command=self._update_buffer_label, height=14)
         self.slider_buffer.set(30)
-        self.slider_buffer.pack(padx=25, pady=5, fill="x")
-        
+        self.slider_buffer.pack(padx=15, pady=2, fill="x")
         self._update_worker_label(self.slider_workers.get())
 
     def _build_main_area(self):
-        # --- TOP SECTION ---
         self.content_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
         self.content_frame.grid(row=0, column=0, sticky="nsew")
         self.content_frame.grid_columnconfigure(0, weight=1)
+        
+        # --- LAYOUT WEIGHTS ---
+        # Row 0: Title (0)
+        # Row 1: Tabs (Weight 3 -> Takes most space)
+        # Row 2: Metrics Title (0)
+        # Row 3: Stats (Weight 1 -> Takes some space)
+        self.content_frame.grid_rowconfigure(1, weight=3)
+        self.content_frame.grid_rowconfigure(3, weight=1)
 
         # 1. Effects
-        ctk.CTkLabel(self.content_frame, text="Active Filters", font=("Roboto", 16, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 15))
-        self.effects_grid = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        self.effects_grid.grid(row=1, column=0, sticky="ew")
-        for i in range(5): self.effects_grid.grid_columnconfigure(i, weight=1)
+        ctk.CTkLabel(self.content_frame, text="Effect Studio", font=("Roboto", 14, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 5))
 
-        effects_data = {
-            "Sharpen": "⚡", "Denoise": "🌫️", "Edge Detect": "🎨", "HDR": "🔆", "Contrast": "🌓",
-            "Sepia": "📜", "Emboss": "🗿", "Invert": "🔄", "Sketch": "✏️", "Vignette": "🌑"
+        self.tab_view = ctk.CTkTabview(self.content_frame, height=200) # Force shorter height
+        self.tab_view.grid(row=1, column=0, sticky="nsew")
+        
+        tab_enhance = self.tab_view.add("Enhance")
+        tab_artistic = self.tab_view.add("Artistic")
+        tab_lens = self.tab_view.add("Lens")
+        
+        effects_map = {
+            "Enhance": {"Sharpen": "⚡", "Denoise": "🌫️", "HDR": "🔆", "Contrast": "🌓"},
+            "Artistic": {"Sepia": "📜", "Emboss": "🗿", "Invert": "🔄", "Sketch": "✏️"},
+            "Lens": {"Vignette": "🌑", "Edge Detect": "🎨"}
         }
-        
-        self.effect_cards = {}
-        i = 0
-        for name, icon in effects_data.items():
-            card = EffectCard(self.effects_grid, text=name, icon=icon, command=self._update_effects)
-            card.grid(row=i//5, column=i%5, padx=6, pady=6, sticky="ew")
-            self.effect_cards[name] = card
-            i += 1
 
-        # 2. Metrics & Graph
-        ctk.CTkLabel(self.content_frame, text="Performance Benchmarking", font=("Roboto", 16, "bold")).grid(row=2, column=0, sticky="w", pady=(40, 15))
+        for tab_name, items in effects_map.items():
+            tab_root = self.tab_view.tab(tab_name)
+            # Scrollable Inner Frame
+            scroll_inner = ctk.CTkScrollableFrame(tab_root, fg_color="transparent")
+            scroll_inner.pack(fill="both", expand=True)
+            scroll_inner.grid_columnconfigure((0, 1, 2, 3), weight=1)
+            
+            col, row = 0, 0
+            for name, icon in items.items():
+                card = EffectCard(scroll_inner, text=name, icon=icon, command=self._update_effects)
+                card.grid(row=row, column=col, padx=5, pady=5, sticky="ew")
+                self.effect_cards[name] = card
+                col += 1
+                if col > 3: col, row = 0, row + 1
+
+        # 2. Benchmarking
+        ctk.CTkLabel(self.content_frame, text="Benchmarks", font=("Roboto", 14, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 5))
         
-        # Container for Cards + Graph
         self.stats_container = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.stats_container.grid(row=3, column=0, sticky="ew")
         self.stats_container.grid_columnconfigure(0, weight=1)
-        self.stats_container.grid_columnconfigure(1, weight=2) # Graph gets more space
+        self.stats_container.grid_columnconfigure(1, weight=2) 
         
-        # Left: Cards
+        # Cards
         self.cards_frame = ctk.CTkFrame(self.stats_container, fg_color="transparent")
-        self.cards_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.cards_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         
-        self.card_time = InfoCard(self.cards_frame, title="Processing Time", value="0.0s", color="#1F6AA5")
-        self.card_time.pack(fill="x", pady=(0, 10))
+        self.card_time = InfoCard(self.cards_frame, title="Time", value="0.0s", color="#1F6AA5")
+        self.card_time.pack(fill="x", pady=(0, 5)) # Tight packing
         
-        self.card_fps = InfoCard(self.cards_frame, title="Throughput (FPS)", value="0", color="#E2B93B")
+        self.card_fps = InfoCard(self.cards_frame, title="FPS", value="0", color="#E2B93B")
         self.card_fps.pack(fill="x")
 
-        # Right: Graph
-        self.graph_frame = RealTimeGraph(self.stats_container, title="Live Parallel Speedup")
-        self.graph_frame.grid(row=0, column=1, sticky="nsew")
+        # Graph
+        self.graph_frame = RealTimeGraph(self.stats_container, title="Parallel Speedup")
+        self.graph_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
-
-        # --- BOTTOM SECTION ---
+        # --- FOOTER ---
         self.footer_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.footer_frame.grid(row=1, column=0, sticky="ew", pady=(20, 0))
+        self.footer_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0))
         self.footer_frame.grid_columnconfigure(0, weight=1)
 
-        self.progress_bar = ctk.CTkProgressBar(self.footer_frame, height=12)
+        self.progress_bar = ctk.CTkProgressBar(self.footer_frame, height=8)
         self.progress_bar.set(0)
-        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
-        self.console = ctk.CTkTextbox(self.footer_frame, height=140, fg_color="#1A1A1A", font=("Consolas", 11), border_width=0, corner_radius=10)
-        self.console.grid(row=1, column=0, sticky="ew", pady=(0, 15))
-        self.console.insert("0.0", f"[System] Ready. {self.cpu_count} logical cores available.\n")
+        # Tiny Console
+        self.console = ctk.CTkTextbox(self.footer_frame, height=60, fg_color="#1A1A1A", font=("Consolas", 9), border_width=0, corner_radius=6)
+        self.console.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+        self.console.insert("0.0", f"[System] Ready. {self.cpu_count} logical cores.\n")
 
-        self.btn_start = ctk.CTkButton(self.footer_frame, text="INITIALIZE ENGINE", height=60, 
-                                       font=("Roboto", 16, "bold"), command=self._toggle_processing, 
+        self.btn_start = ctk.CTkButton(self.footer_frame, text="INITIALIZE ENGINE", height=40, 
+                                       font=("Roboto", 13, "bold"), command=self._toggle_processing, 
                                        fg_color=ACCENT, hover_color="#144870")
         self.btn_start.grid(row=2, column=0, sticky="ew")
 
+    # --- LOGIC ---
     def _create_section_label(self, parent, text):
-        ctk.CTkLabel(parent, text=text, font=("Roboto", 11, "bold"), text_color="#666666").pack(padx=25, pady=(30, 10), anchor="w")
+        ctk.CTkLabel(parent, text=text, font=("Roboto", 9, "bold"), text_color="#666666").pack(padx=15, pady=(15, 5), anchor="w")
+
+    def _on_close(self):
+        if self.engine.is_running:
+            if messagebox.askokcancel("Quit", "Processing is active. Stop engine?"):
+                self.engine.stop()
+                self.destroy()
+        else:
+            self.destroy()
+
+    def _apply_preset(self, filters):
+        self.log(f"Applying Preset: {filters}")
+        for card in self.effect_cards.values():
+            if card.is_active: card._on_click()
+        for name in filters:
+            if name in self.effect_cards:
+                card = self.effect_cards[name]
+                if not card.is_active: card._on_click()
+        self._update_effects()
 
     def _update_worker_label(self, value):
         self.lbl_workers.configure(text=f"Threads: {int(value)}")
@@ -161,25 +214,22 @@ class VideoProcessingApp(ctk.CTk):
             self.lbl_file.configure(text=os.path.basename(filename))
             self.log(f"Selected: {filename}")
             self.btn_start.configure(text="START PROCESSING")
-            self.graph_frame.reset() # Reset graph on new file
+            self.graph_frame.reset() 
 
     def _update_effects(self):
         self.active_effects = [name for name, card in self.effect_cards.items() if card.get() == 1]
-        self.log(f"Effects Chain: {self.active_effects}")
+        self.log(f"Effects: {self.active_effects}")
 
     def _toggle_processing(self):
         if not self.ui_is_processing:
             if not self.selected_file:
                 self.log("Error: No video selected.", "error")
                 return
-
             output_file = os.path.splitext(self.selected_file)[0] + "_processed.mp4"
             workers = int(self.slider_workers.get())
             buffer = int(self.slider_buffer.get())
             
-            self.log("Initializing Parallel Engine...")
-            self.log(f"Pipeline: {workers} Threads | {buffer} Buffer Blocks | Zero-Copy ON")
-            
+            self.log("Initializing...")
             threading.Thread(target=self._run_engine, args=(output_file, workers, buffer)).start()
             
             self.ui_is_processing = True
@@ -188,7 +238,7 @@ class VideoProcessingApp(ctk.CTk):
             self.progress_bar.start()
             self.graph_frame.reset()
         else:
-            self.log("Stopping Engine...")
+            self.log("Stopping...")
             self.engine.stop()
             self._reset_ui_state()
 
@@ -197,19 +247,16 @@ class VideoProcessingApp(ctk.CTk):
             self.engine.start(self.selected_file, output, workers, buffer, self.active_effects)
             self.log("Pipeline Active.")
         except Exception as e:
-            self.log(f"Engine Error: {e}", "error")
+            self.log(f"Error: {e}", "error")
             self.after(0, self._reset_ui_state)
 
     def _update_metrics(self):
         if self.ui_is_processing:
             is_alive = self.engine.check_health()
             if is_alive:
-                # UPDATED: Unpack 3 values now
                 elapsed, fps, frames = self.engine.get_progress()
                 self.card_time.update_value(f"{elapsed:.1f}s")
                 self.card_fps.update_value(f"{int(fps)}")
-                
-                # Update Graph
                 self.graph_frame.update_graph(elapsed, fps)
             else:
                 self.log("Task Completed.")
@@ -224,6 +271,8 @@ class VideoProcessingApp(ctk.CTk):
         self.progress_bar.set(0)
 
     def log(self, message, level="info"):
+        if level == "error": log.error(message)
+        else: log.info(message)
         timestamp = time.strftime("%H:%M:%S")
         self.console.insert("end", f"[{timestamp}] {message}\n")
         self.console.see("end")
